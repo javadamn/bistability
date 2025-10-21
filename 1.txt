@@ -1,0 +1,293 @@
+# calibrate_hysteresis_from_scored_updated_v3.py
+# ------------------------------------------------------------
+# Robust calibration of a single-latent-producer hysteretic model
+# to SCFA intensities (butyrate +/- friends) and an H proxy.
+#
+# Updates vs v2:
+#  - Masks non-finite observations per subject when forming residuals.
+#  - Replaces any remaining non-finite residuals with large finite penalties.
+#  - Adds basic reporting of usable points per subject.
+# ------------------------------------------------------------
+
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.integrate import solve_ivp
+from scipy.optimize import least_squares
+
+# ----------------- Config -----------------
+INPATH  = "timeseries/combined_scfas_table_scored.csv"
+OUTDIR  = "mw_fit_out"
+os.makedirs(OUTDIR, exist_ok=True)
+
+USE_H_COL  = "H_proxy_meta_smooth"   # fallback to "H_proxy_meta" if needed
+USE_B_COLS = ["butyrate"]            # add "propionate" to average as composite
+
+MIN_POINTS_PER_SUBJECT = 4
+PENALTY = 1e3  # large finite penalty for any pathological case
+
+# ----------------- Load & checks -----------------
+df = pd.read_csv(INPATH)
+needed = {"subject_id","sample_id"}
+missing = [c for c in needed if c not in df.columns]
+if missing:
+    raise ValueError(f"Missing required columns in CSV: {missing}")
+
+if USE_H_COL not in df.columns:
+    alt = "H_proxy_meta"
+    if alt in df.columns:
+        print(f"[info] {USE_H_COL} not found; using {alt} instead.")
+        USE_H_COL = alt
+    else:
+        raise ValueError("No usable H proxy column found (need H_proxy_meta_smooth or H_proxy_meta).")
+
+for c in USE_B_COLS:
+    if c not in df.columns:
+        raise ValueError(f"SCFA column '{c}' not found in CSV.")
+
+keep = ["subject_id","sample_id", USE_H_COL] + USE_B_COLS
+df = df[keep].dropna(subset=["subject_id","sample_id"]).copy()
+
+# ----------------- Time indexing -----------------
+df["t_idx"] = df.groupby("subject_id").cumcount().astype(float)
+
+# ----------------- Robust scaling (MAD) -----------------
+def robust_mad_scale(x: pd.Series) -> pd.Series:
+    x_valid = x.dropna().astype(float)
+    if len(x_valid) == 0:
+        return pd.Series(np.zeros_like(x), index=x.index)
+    med = np.median(x_valid)
+    mad = np.median(np.abs(x_valid - med))
+    if mad < 1e-9:
+        q75, q25 = np.percentile(x_valid, [75, 25])
+        iqr = q75 - q25
+        scale = iqr if iqr > 1e-9 else (np.std(x_valid) + 1e-9)
+    else:
+        scale = mad
+    return (x.astype(float) - med) / (scale + 1e-9)
+
+for c in USE_B_COLS:
+    df[c + "_z"] = df.groupby("subject_id")[c].transform(robust_mad_scale)
+
+if len(USE_B_COLS) == 1:
+    df["B_obs"] = df[USE_B_COLS[0] + "_z"]
+else:
+    zcols = [c + "_z" for c in USE_B_COLS]
+    df["B_obs"] = df[zcols].mean(axis=1)
+
+df["H_obs"] = df[USE_H_COL].clip(0, 1)
+
+# ----------------- Pack per-subject series -----------------
+subjects = df["subject_id"].unique().tolist()
+subs = []
+for s in subjects:
+    sub = df[df["subject_id"]==s].sort_values("t_idx")
+    # Enough rows + some finite points in both channels
+    if sub.shape[0] >= MIN_POINTS_PER_SUBJECT:
+        Bv = sub["B_obs"].values.astype(float)
+        Hv = sub["H_obs"].values.astype(float)
+        if np.isfinite(Bv).sum() >= 3 and np.isfinite(Hv).sum() >= 3:
+            subs.append({
+                "sid": s,
+                "t": sub["t_idx"].values.astype(float),
+                "B": Bv,
+                "H": Hv
+            })
+
+if not subs:
+    raise RuntimeError("No subject has enough finite points to fit (need ≥4 rows and ≥3 finite in both B & H).")
+
+print(f"[info] Fitting {len(subs)} subjects...")
+print("[info] Per-subject usable points (finite counts):")
+for S in subs[:10]:
+    print(f"  - {S['sid']}: B={np.isfinite(S['B']).sum()}, H={np.isfinite(S['H']).sum()} (of {len(S['t'])})")
+if len(subs) > 10:
+    print("  ...")
+
+# ----------------- Helpers -----------------
+def first_finite(x: np.ndarray, default: float) -> float:
+    idx = np.where(np.isfinite(x))[0]
+    if len(idx) > 0:
+        return float(x[idx[0]])
+    return float(default)
+
+def safe_median(x: np.ndarray, default: float) -> float:
+    xf = x[np.isfinite(x)]
+    return float(np.median(xf)) if len(xf) else float(default)
+
+# ----------------- Hysteretic model -----------------
+# y = [M, H, B, q]
+# p = [r_max,K_M,c,d,g,u,p_low,p_high,H_on,H_off,tau_q]
+def rhs(t, y, p):
+    M, H, B, q = y
+    r_max, K_M, c, d, g, u, pL, pH, H_on, H_off, tau = p
+    pB = pL + (pH - pL)*np.clip(q, 0, 1)
+    dM = (r_max - c*pB)*M*(1 - M/K_M)
+    dH = g*B*(1 - H) - d*H
+    dB = pB*M - u*H*B
+    if H < H_on:
+        q_inf = 1.0
+    elif H > H_off:
+        q_inf = 0.0
+    else:
+        q_inf = q
+    dq = (q_inf - q) / tau
+    return [dM, dH, dB, dq]
+
+def simulate(ts, y0, p):
+    y0 = np.array(y0, dtype=float)
+    if not np.all(np.isfinite(y0)):
+        T = len(ts)
+        return np.vstack([np.full(T, np.nan)]*4)
+    try:
+        sol = solve_ivp(lambda t,y: rhs(t,y,p), (ts[0], ts[-1]), y0, t_eval=ts,
+                        rtol=1e-6, atol=1e-8, max_step=0.5)
+        if not sol.success:
+            T = len(ts)
+            return np.vstack([np.full(T, np.nan)]*4)
+        return sol.y
+    except Exception:
+        T = len(ts)
+        return np.vstack([np.full(T, np.nan)]*4)
+
+# ----------------- Parameters -----------------
+LBg = np.array([0.1, 0.4, 0.02, 0.01, 0.05, 0.2, 0.0, 0.5, 0.2, 0.3, 0.5])
+UBg = np.array([0.6, 1.5, 0.25, 0.5 , 2.0 , 1.2, 0.8, 4.0, 0.8, 0.95,24.0])
+x0g = np.array([0.32, 1.0, 0.10, 0.12, 0.5, 0.6, 0.1, 2.5, 0.55, 0.70, 4.0])
+
+x0s, LBs, UBs = [], [], []
+for _ in subs:
+    x0s += [1.0, 0.0, 1.0]  # alpha_B, beta0_H, beta1_H
+    LBs += [0.1, -0.5,  0.1]
+    UBs += [5.0,  0.5,  2.0]
+
+x0 = np.concatenate([x0g, np.array(x0s, dtype=float)])
+LB = np.concatenate([LBg, np.array(LBs, dtype=float)])
+UB = np.concatenate([UBg, np.array(UBs, dtype=float)])
+
+def unpack(x):
+    gpar = x[:11]
+    spar = x[11:]
+    triples = np.split(spar, len(subs))
+    return gpar, triples
+
+# ----------------- Residuals (masked & finite) -----------------
+def residuals(x):
+    gpar, triples = unpack(x)
+    # enforce H_off > H_on softly
+    if gpar[9] <= gpar[8]:
+        return PENALTY * np.ones(10)
+
+    res_chunks = []
+    for (S,tr) in zip(subs, triples):
+        alpha_B, beta0, beta1 = tr
+
+        # Initialize from first finite or median
+        H0 = float(np.clip(first_finite(S["H"], default=0.5), 0, 1))
+        if not np.isfinite(H0):
+            H0 = float(np.clip(safe_median(S["H"], 0.5), 0, 1))
+        B0f = first_finite(S["B"], default=0.1)
+        B0 = float(B0f if np.isfinite(B0f) else 0.1)
+        if B0 <= 0: B0 = 0.05
+        M0 = 0.1
+        q0 = 1.0 if H0 < gpar[8] else 0.0
+        y0 = [M0, H0, B0, q0]
+
+        Y = simulate(S["t"], y0, gpar)  # (4, T)
+        _, H, B, _ = Y
+
+        # If integration failed, penalize with fixed-length penalties
+        if np.any(~np.isfinite(H)) or np.any(~np.isfinite(B)):
+            # Two channels of penalties with same length as this subject
+            res_chunks.append(np.full_like(S["B"], PENALTY, dtype=float))
+            res_chunks.append(np.full_like(S["H"], PENALTY, dtype=float))
+            continue
+
+        Bhat = alpha_B * B
+        Hhat = np.clip(beta0 + beta1*H, 0, 1)
+
+        # Mask out non-finite observations and predictions
+        maskB = np.isfinite(S["B"]) & np.isfinite(Bhat)
+        maskH = np.isfinite(S["H"]) & np.isfinite(Hhat)
+
+        if maskB.any():
+            rB = (Bhat[maskB] - S["B"][maskB])
+            rB = np.nan_to_num(rB, nan=PENALTY, posinf=PENALTY, neginf=-PENALTY)
+            res_chunks.append(rB)
+        else:
+            # if no usable B points exist, add a small penalty vector to keep shape
+            res_chunks.append(np.array([PENALTY]))
+
+        if maskH.any():
+            rH = (Hhat[maskH] - S["H"][maskH])
+            rH = np.nan_to_num(rH, nan=PENALTY, posinf=PENALTY, neginf=-PENALTY)
+            res_chunks.append(rH)
+        else:
+            res_chunks.append(np.array([PENALTY]))
+
+    res = np.concatenate(res_chunks)
+    # Ensure finite residuals (for safety at x0)
+    res = np.nan_to_num(res, nan=PENALTY, posinf=PENALTY, neginf=-PENALTY)
+    return res
+
+# ----------------- Fit -----------------
+fit = least_squares(
+    residuals, x0, bounds=(LB, UB),
+    verbose=2, max_nfev=800,
+    loss="soft_l1", f_scale=1.0
+)
+gpar_hat, triples_hat = unpack(fit.x)
+
+param_names = ["r_max","K_M","c","d","g","u","p_low","p_high","H_on","H_off","tau_q"]
+pd.Series(gpar_hat, index=param_names).to_csv(os.path.join(OUTDIR, "fitted_global_params.csv"))
+
+pd.DataFrame(
+    [{"subject_id": S["sid"], "alpha_B": tr[0], "beta0_H": tr[1], "beta1_H": tr[2]}
+     for S,tr in zip(subs, triples_hat)]
+).to_csv(os.path.join(OUTDIR, "fitted_subject_scales.csv"), index=False)
+
+print("[info] Fitted global params:", dict(zip(param_names, gpar_hat)))
+
+# ----------------- Diagnostics (first few subjects) -----------------
+for S,tr in list(zip(subs, triples_hat))[:8]:
+    alpha_B, beta0, beta1 = tr
+
+    H0 = float(np.clip(first_finite(S["H"], 0.5), 0, 1))
+    if not np.isfinite(H0):
+        H0 = float(np.clip(safe_median(S["H"], 0.5), 0, 1))
+    B0f = first_finite(S["B"], 0.1)
+    B0 = float(B0f if np.isfinite(B0f) else 0.1)
+    if B0 <= 0: B0 = 0.05
+
+    y0 = [0.1, H0, B0, 1.0 if H0 < gpar_hat[8] else 0.0]
+    Y = simulate(S["t"], y0, gpar_hat)
+    M,H,B,q = Y
+    if np.any(~np.isfinite(H)) or np.any(~np.isfinite(B)):
+        continue
+    Bhat = alpha_B*B
+    Hhat = np.clip(beta0 + beta1*H, 0, 1)
+
+    maskB = np.isfinite(S["B"]) & np.isfinite(Bhat)
+    maskH = np.isfinite(S["H"]) & np.isfinite(Hhat)
+
+    fig, ax = plt.subplots(2,1, figsize=(7,6), sharex=True)
+    ax[0].plot(S["t"][maskB], Bhat[maskB], label="Model B (scaled)")
+    ax[0].scatter(S["t"][maskB], S["B"][maskB], s=18, c="k", label="Obs B (z)")
+    ax[0].set_ylabel("B intensity (scaled)")
+    ax[0].legend(); ax[0].grid(True, ls=":")
+
+    ax[1].plot(S["t"][maskH], Hhat[maskH], label="Model H")
+    ax[1].scatter(S["t"][maskH], S["H"][maskH], s=18, c="k", label="H proxy")
+    ax[1].axhline(gpar_hat[8], ls=":", c="gray", label="H_on")
+    ax[1].axhline(gpar_hat[9], ls="--", c="gray", label="H_off")
+    ax[1].set_xlabel("time index"); ax[1].set_ylabel("H")
+    ax[1].legend(); ax[1].grid(True, ls=":")
+
+    plt.tight_layout()
+    plt.savefig(os.path.join(OUTDIR, f"diag_{S['sid']}.png"), dpi=180)
+    plt.close()
+
+print("✅ Done. See outputs in:", OUTDIR)
+
+

@@ -1,0 +1,4 @@
+Baseline d = 0.01000
+Distinct stable equilibria at baseline (by H*): 0
+Bistable at baseline? NO
+Model used: smooth + positive feedback (r_H={R_H_VALUE})

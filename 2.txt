@@ -1,0 +1,103 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.integrate import solve_ivp
+
+# Load fitted outputs
+gpath = "mw_fit_out/fitted_global_params.csv"
+spath = "mw_fit_out/fitted_subject_scales.csv"
+gdf = pd.read_csv(gpath, index_col=0).squeeze("columns")
+sdf = pd.read_csv(spath)
+
+# Summaries
+globals_summary = gdf.to_dict()
+subject_stats = {
+    "n_subjects": len(sdf),
+    "alpha_B_median": float(sdf["alpha_B"].median()) if "alpha_B" in sdf.columns else None,
+    "alpha_B_IQR": (
+        float(sdf["alpha_B"].quantile(0.75) - sdf["alpha_B"].quantile(0.25))
+        if "alpha_B" in sdf.columns else None
+    ),
+    "beta1_H_median": float(sdf["beta1_H"].median()) if "beta1_H" in sdf.columns else None,
+    "beta1_H_IQR": (
+        float(sdf["beta1_H"].quantile(0.75) - sdf["beta1_H"].quantile(0.25))
+        if "beta1_H" in sdf.columns else None
+    ),
+}
+
+# Quick plausibility checks
+checks = {
+    "H_off>H_on": bool(gdf.get("H_off", np.nan) > gdf.get("H_on", np.nan)),
+    "p_high>p_low": bool(gdf.get("p_high", np.nan) > gdf.get("p_low", np.nan)),
+    "r_net_at_p_high_positive": bool((gdf.get("r_max", np.nan) - gdf.get("c", np.nan)*gdf.get("p_high", np.nan)) > 0),
+}
+
+# Make a forward/backward hysteresis sweep with fitted globals
+def rhs_mem(t, y, p):
+    M,H,B,q = y
+    r_max,K_M,c,d,g,u,pL,pH,H_on,H_off,tau = p
+    pB = pL + (pH - pL)*np.clip(q,0,1)
+    dM = (r_max - c*pB)*M*(1 - M/K_M)
+    dH = g*B*(1 - H) - d*H
+    dB = pB*M - u*H*B
+    if H < H_on: qinf=1.0
+    elif H > H_off: qinf=0.0
+    else: qinf=q
+    dq = (qinf - q)/tau
+    return [dM,dH,dB,dq]
+
+pars = [
+    gdf.get("r_max", 0.32),
+    gdf.get("K_M", 1.0),
+    gdf.get("c", 0.10),
+    None,  # d will be swept
+    gdf.get("g", 0.5),
+    gdf.get("u", 0.6),
+    gdf.get("p_low", 0.1),
+    gdf.get("p_high", 2.5),
+    gdf.get("H_on", 0.55),
+    gdf.get("H_off", 0.70),
+    gdf.get("tau_q", 4.0),
+]
+
+def simulate_to_ss(d_val, y0, T=160):
+    p = pars.copy()
+    p[3] = d_val
+    sol = solve_ivp(lambda t,y: rhs_mem(t,y,p), (0,T), y0, t_eval=np.linspace(0,T,600),
+                    rtol=1e-6, atol=1e-8, max_step=0.5)
+    return sol.y[:,-1], sol
+
+d_grid = np.linspace(0.00, 0.30, 36)
+y = np.array([0.1, 0.7, 0.1, 0.0], dtype=float)
+
+fwd = []
+for d in d_grid:
+    y, _ = simulate_to_ss(d, y, T=160)
+    fwd.append((d, *y))
+
+bwd = []
+for d in d_grid[::-1]:
+    y, _ = simulate_to_ss(d, y, T=160)
+    bwd.append((d, *y))
+
+fwd = pd.DataFrame(fwd, columns=["d","M","H","B","q"])
+bwd = pd.DataFrame(bwd, columns=["d","M","H","B","q"])
+
+# Plot hysteresis (if present)
+fig, ax = plt.subplots(2,1, figsize=(7,8), sharex=True)
+ax[0].plot(fwd["d"], fwd["H"], marker="o", label="forward (d↑)")
+ax[0].plot(bwd["d"], bwd["H"], marker="s", label="backward (d↓)")
+ax[0].axhline(gdf.get("H_on", np.nan), ls=":", c="gray", label="H_on")
+ax[0].axhline(gdf.get("H_off", np.nan), ls="--", c="gray", label="H_off")
+ax[0].set_ylabel("H*"); ax[0].grid(True, ls=":"); ax[0].legend()
+
+ax[1].plot(fwd["d"], fwd["q"], marker="o", label="forward (d↑)")
+ax[1].plot(bwd["d"], bwd["q"], marker="s", label="backward (d↓)")
+ax[1].set_xlabel("d (1/h)"); ax[1].set_ylabel("q*"); ax[1].grid(True, ls=":"); ax[1].legend()
+
+plt.tight_layout()
+# out_plot = "/mnt/data/hysteresis_from_fit.png"
+# plt.savefig(out_plot, dpi=180)
+
+globals_summary, subject_stats, checks, out_plot
+

@@ -1,0 +1,12 @@
+FIT=mw_fit_out_guild_hard_targets/fitted_global_params.csv
+N_HILL=4, KQ=120
+baseline d=0.0600
+Equilibria (sorted by H):
+           P            C            H        B            q       lam_max  stable
+6.000103e-16 2.680301e-01 2.989975e-13 0.000074 1.050474e-28 -6.406627e-12    True
+1.155305e-01 1.237148e-01 7.434011e-02 0.053423 0.000000e+00  3.246864e-02   False
+2.725667e-01 4.516251e-21 1.508323e-01 0.065275 6.577059e-24 -7.665483e-02    True
+2.369051e-01 0.000000e+00 6.491435e-01 0.121497 2.390485e-01  5.743423e-01   False
+low-H*=0.000
+high-H*=0.151
+saddle H=0.074

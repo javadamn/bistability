@@ -1,0 +1,165 @@
+# calibrate_guild_hard_targets.py
+import os, numpy as np, pandas as pd
+from scipy.integrate import solve_ivp
+from scipy.optimize import least_squares
+
+INPATH = "timeseries/combined_scfas_table_scored.csv"
+OUTDIR = "mw_fit_out_guild_hard_targets"; os.makedirs(OUTDIR, exist_ok=True)
+
+# === anchor around the pocket that gave 2 stable eq in the scan ===
+TARGETS = {
+    "u": 0.77,     "sd_u": 0.03,    # tighter
+    "K_u": 0.18,   "sd_K_u": 0.03,
+    "gamma": 1.25, "sd_gamma": 0.10,
+    "p_high": 3.20,"sd_p_high": 0.20,
+    "rHP": 0.0344, "sd_rHP": 0.02,
+    # If your best pocket appeared at d_eval different from baseline, anchor d too:
+    # "d": 0.054,   "sd_d": 0.006,
+}
+
+H_COLS=["H_proxy_meta_smooth","H_proxy_meta"]
+SCFA=["butyrate"]; MIN_ROWS=4
+KQ=80.0; HILL_N=3
+PENALTY=1e3
+
+# Baseline priors (kept modest)
+PRIOR={"r0P":(0.32,0.08),"rHP":(0.07,0.04),"r0C":(0.28,0.08),"K_M":(1.0,0.25),
+       "gamma":(0.85,0.25),"c":(0.12,0.05),"d":(0.12,0.05),"g":(0.60,0.30),
+       "u":(0.60,0.15),"K_u":(0.20,0.08),"p_low":(0.12,0.06),"p_high":(2.20,0.60),
+       "H_on":(0.60,0.08),"H_off":(0.86,0.04),"tau_q":(5.0,2.0),"K_B":(0.20,0.08)}
+
+# Start from your previous two-guild bounds, but **shrink** key ones around TARGETS
+def band(c, w_lo, w_hi): return c - w_lo, c + w_hi
+uL,uU   = band(TARGETS["u"],   0.05, 0.05)
+KuL,KuU = band(TARGETS["K_u"], 0.06, 0.06)
+gaL,gaU = band(TARGETS["gamma"], 0.20, 0.15)
+pHL,pHU = band(TARGETS["p_high"], 0.40, 0.30)
+# other bounds (safe defaults)
+LBg=np.array([0.18,0.00,0.15,0.55,gaL,0.06,0.06,0.20,uL,KuL,0.06,pHL,0.50,0.80,1.0,0.10])
+UBg=np.array([0.46,0.14,0.40,1.60,gaU,0.20,0.22,1.40,uU,KuU,0.28,pHU,0.74,0.92,10.,0.40])
+# Optional: also narrow d if you know the pocket needed d slightly lower/higher.
+if "d" in TARGETS:
+    LBg[6], UBg[6] = band(TARGETS["d"], 0.01, 0.01)
+
+x0g=np.array([0.32,0.05,0.28,1.0,1.10,0.12,0.10,0.70, TARGETS["u"], TARGETS["K_u"],
+              0.12, TARGETS["p_high"], 0.60,0.86,5.5,0.20], float)
+
+# --- data prep (same as before; omitted plotting for brevity) ---
+df=pd.read_csv(INPATH)
+Hcol=next((c for c in H_COLS if c in df.columns), None)
+if Hcol is None: raise ValueError("Need H proxy col")
+for c in SCFA:
+    if c not in df.columns: raise ValueError(f"Missing {c}")
+df=df[["subject_id","sample_id",Hcol]+SCFA].dropna(subset=["subject_id","sample_id"]).copy()
+df["t_idx"]=df.groupby("subject_id").cumcount().astype(float)
+
+def robust_z(s):
+    x=s.astype(float).to_numpy(); m=np.isfinite(x)
+    if m.sum()==0: import pandas as pd; return pd.Series(np.zeros_like(x), index=s.index)
+    xm=x[m]; med=np.median(xm); mad=np.median(np.abs(xm-med))
+    scale=mad if mad>1e-9 else (np.percentile(xm,75)-np.percentile(xm,25) or np.std(xm)+1e-9)
+    import pandas as pd; return pd.Series((x-med)/(scale+1e-9), index=s.index)
+
+df["B_z"]=df.groupby("subject_id")[SCFA[0]].transform(robust_z)
+df["H_obs"]=df[Hcol].clip(0,1)
+
+subs=[]
+for sid,sub in df.groupby("subject_id"):
+    sub=sub.sort_values("t_idx")
+    if len(sub)<MIN_ROWS: continue
+    t=sub["t_idx"].to_numpy(float)
+    B=sub["B_z"].to_numpy(float); H=sub["H_obs"].to_numpy(float)
+    mB=np.isfinite(B); mH=np.isfinite(H)
+    if mB.sum()<3 or mH.sum()<3: continue
+    def first(a,d):
+        import numpy as np
+        a=np.asarray(a,float); idx=np.where(np.isfinite(a))[0]
+        return float(a[idx[0]]) if len(idx) else float(d)
+    subs.append({"sid":sid,"t":t,"B":B,"H":H,"maskB":mB,"maskH":mH,
+                 "nB":int(mB.sum()),"nH":int(mH.sum()),
+                 "H0":float(np.clip(first(H,0.6),0,1)),
+                 "B0":float(max(0.05, first(B,0.1)))})
+if not subs: raise RuntimeError("no subjects")
+
+# --- model (same RHS as before for calibration; n=3, KQ=80) ---
+def q_inf(H,q,H_on,H_off,KQ):
+    th=(1-q)*H_on + q*H_off
+    return 1.0/(1.0 + np.exp(-KQ*(H - th)))
+
+def rhs(t,y,p):
+    P,C,H,B,q=y
+    r0P,rHP,r0C,K_M,gamma,c,d,gH,u,K_u,pL,pH,H_on,H_off,tau,K_B = p
+    pB = pL + (pH - pL)*np.clip(q,0,1)
+    dP = P*( r0P + rHP*H - c*pB - (P + gamma*C)/K_M )
+    dC = C*( r0C           -        (C + gamma*P)/K_M )
+    uptake = u*H*B/(K_u + B + 1e-9)
+    dB = pB*P - uptake
+    n = 3
+    dH = gH*(B**n/(K_B**n + B**n))*(1 - H) - d*H
+    dq = (q_inf(H,q,H_on,H_off,KQ) - q)/tau
+    return [dP,dC,dH,dB,dq]
+
+def simulate(ts,y0,p):
+    try:
+        sol=solve_ivp(lambda t,z: rhs(t,z,p),(ts[0],ts[-1]),y0,t_eval=ts,
+                      rtol=1e-6,atol=1e-8,max_step=0.5)
+        if not sol.success:
+            T=len(ts); return np.vstack([np.full(T,np.nan)]*5)
+        return sol.y
+    except Exception:
+        T=len(ts); return np.vstack([np.full(T,np.nan)]*5)
+
+# per-subject obs maps
+x0s=[]; LBs=[]; UBs=[]
+for _ in subs: x0s += [1.0, 0.0, 1.0]; LBs += [0.6, -0.2, 0.8]; UBs += [1.6, 0.2, 1.2]
+x0=np.concatenate([x0g, np.array(x0s,float)])
+LB=np.concatenate([LBg, np.array(LBs,float)])
+UB=np.concatenate([UBg, np.array(UBs,float)])
+
+NAMES=["r0P","rHP","r0C","K_M","gamma","c","d","g","u","K_u","p_low","p_high","H_on","H_off","tau_q","K_B"]
+def unpack(x):
+    gpar=x[:len(NAMES)]
+    triples=np.split(x[len(NAMES):], len(subs))
+    return gpar, triples
+
+W_B,W_H=0.6,1.2
+# heavier weights for target priors
+WT=6.0
+
+def residuals(x):
+    gpar, triples = unpack(x)
+    if not (gpar[13] > gpar[12]): return np.ones(1000)*PENALTY
+    res=[]
+    for S,tr in zip(subs, triples):
+        aB,b0,b1=tr
+        ts=S["t"]; H0=np.clip(S["H0"],0,1); B0=max(0.05,S["B0"])
+        P0=C0=0.12; q0=1.0 if H0 < 0.5*(gpar[12]+gpar[13]) else 0.0
+        y0=[P0,C0,H0,B0,q0]
+        Y=simulate(ts,y0,gpar)
+        if np.any(~np.isfinite(Y)):
+            res += [W_B*np.full(S["nB"],PENALTY), W_H*np.full(S["nH"],PENALTY)]
+            continue
+        P,C,H,B,q=Y
+        Bh=aB*B; Hh=np.clip(b0 + b1*H,0,1)
+        res += [W_B*(Bh[S["maskB"]] - S["B"][S["maskB"]]),
+                W_H*(Hh[S["maskH"]] - S["H"][S["maskH"]])]
+    # modest baseline priors
+    idx={nm:i for i,nm in enumerate(NAMES)}
+    for nm,(mu,sd) in PRIOR.items():
+        res.append(np.array([(gpar[idx[nm]]-mu)/(sd+1e-9)]))
+    # HARD targets
+    res.append(WT*np.array([(gpar[idx["u"]]      - TARGETS["u"])/     (TARGETS["sd_u"]+1e-9)]))
+    res.append(WT*np.array([(gpar[idx["K_u"]]    - TARGETS["K_u"])/   (TARGETS["sd_K_u"]+1e-9)]))
+    res.append(WT*np.array([(gpar[idx["gamma"]]  - TARGETS["gamma"])/ (TARGETS["sd_gamma"]+1e-9)]))
+    res.append(WT*np.array([(gpar[idx["p_high"]] - TARGETS["p_high"])/(TARGETS["sd_p_high"]+1e-9)]))
+    res.append(WT*np.array([(gpar[idx["rHP"]]    - TARGETS["rHP"])/   (TARGETS["sd_rHP"]+1e-9)]))
+    if "d" in TARGETS:
+        res.append(WT*np.array([(gpar[idx["d"]] - TARGETS["d"])/(TARGETS["sd_d"]+1e-9)]))
+    return np.concatenate(res)
+
+fit=least_squares(residuals, x0, bounds=(LB,UB), verbose=2, max_nfev=1500, loss="soft_l1", f_scale=1.0)
+gpar_hat,_=unpack(fit.x)
+pd.Series(gpar_hat,index=NAMES).to_csv(os.path.join(OUTDIR,"fitted_global_params.csv"), header=False)
+print("[info] globals:", dict(zip(NAMES, gpar_hat)))
+print("Saved:", OUTDIR)
+

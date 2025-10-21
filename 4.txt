@@ -1,0 +1,129 @@
+# bifurcation_basins_from_hard_fit.py
+import os, numpy as np, pandas as pd, matplotlib.pyplot as plt
+from scipy.optimize import root
+import numpy.linalg as npl
+from scipy.integrate import solve_ivp
+
+FIT = "mw_fit_out_guild_hard_targets/fitted_global_params.csv"   # <- your latest fit
+OUT = "mw_bif_guild_hard_fit"; os.makedirs(OUT, exist_ok=True)
+
+# Curvature / memory for the check (tune if needed)
+N_HILL = 4
+KQ     = 80
+
+# Load fitted globals
+g = pd.read_csv(FIT, index_col=0, header=None).squeeze("columns")
+# p = [r0P,rHP,r0C,K_M,gamma,c,d,g,u,K_u,p_low,p_high,H_on,H_off,tau_q,K_B]
+p = np.array([float(g[k]) for k in g.index.values], float)
+d_fit = float(p[6])
+
+def q_inf(H,q,H_on,H_off):
+    th=(1-q)*H_on + q*H_off
+    return 1.0/(1.0 + np.exp(-KQ*(H - th)))
+
+def rhs(y,pvec,d_override=None):
+    P,C,H,B,q = y
+    r0P,rHP,r0C,K_M,gamma,c,d,gH,u,K_u,pL,pH,H_on,H_off,tau,K_B = pvec.copy()
+    if d_override is not None:
+        d = d_override
+    pB = pL + (pH - pL)*np.clip(q,0,1)
+    # ecology
+    dP = P*( r0P + rHP*H - c*pB - (P + gamma*C)/K_M )
+    dC = C*( r0C           -        (C + gamma*P)/K_M )
+    # butyrate & host
+    uptake = u*H*B/(K_u + B + 1e-9)
+    dB = pB*P - uptake
+    dH = gH*(B**N_HILL/(K_B**N_HILL + B**N_HILL))*(1 - H) - d*H
+    dq = (q_inf(H,q,H_on,H_off) - q)/tau
+    return np.array([dP,dC,dH,dB,dq], float)
+
+def jac_fd(fun,y,args,eps=1e-7):
+    f0=fun(y,*args); J=np.zeros((5,5))
+    for i in range(5):
+        y2=y.copy(); y2[i]+=eps
+        J[:,i]=(fun(y2,*args)-f0)/eps
+    return J
+
+def find_eq(pvec,dval,guess):
+    sol=root(lambda yy: rhs(yy,pvec,dval), guess, method="hybr")
+    if not sol.success:
+        return None, False
+    y=sol.x
+    y=np.array([max(0,y[0]), max(0,y[1]),
+                np.clip(y[2],0,1.2), max(0,y[3]), np.clip(y[4],0,1.2)], float)
+    if not np.all(np.isfinite(y)): return None, False
+    return y, True
+
+# ---- Continuation in d
+d_vals = np.linspace(0.7*d_fit, 1.6*d_fit, 140)
+seeds = [
+    np.array([0.12,0.12,0.30,0.10,1.0]),
+    np.array([0.05,0.20,0.90,0.12,0.0]),
+    np.array([0.30,0.08,0.55,0.10,0.6]),
+    np.array([0.15,0.15,0.65,0.12,0.4]),
+]
+rows=[]
+for d in d_vals:
+    for wi,y0 in enumerate(seeds):
+        y, ok = find_eq(p, d, y0)
+        if not ok: continue
+        lam_max = np.max(np.real(npl.eigvals(jac_fd(rhs, y, (p,d)))))
+        rows.append({"d":d, "H":float(y[2]), "seed":wi, "stable":(lam_max<0)})
+
+branches = pd.DataFrame(rows)
+branches.to_csv(os.path.join(OUT,"branches.csv"), index=False)
+
+# Plot bifurcation
+plt.figure(figsize=(7.6,5.2))
+for wi in sorted(branches["seed"].unique()):
+    sub=branches[branches["seed"]==wi]
+    plt.plot(sub["d"], sub["H"], ".", ms=3, alpha=0.7, label=f"seed{wi}")
+for st, mk in [(True,"o"),(False,"x")]:
+    sub=branches[branches["stable"]==st]
+    plt.scatter(sub["d"], sub["H"], s=24, marker=mk, alpha=0.7, label=("stable" if st else "unstable"))
+plt.axvline(d_fit, ls="--", c="gray", label="baseline d")
+plt.xlabel("d (1/h)"); plt.ylabel("H*"); plt.legend(); plt.grid(True, ls=":")
+plt.tight_layout(); plt.savefig(os.path.join(OUT,"bifurcation_H_vs_d.png"), dpi=180); plt.close()
+
+# Count distinct stable equilibria at baseline
+near = branches[np.isclose(branches["d"], d_fit, atol=1e-3)]
+distinct=0
+if not near.empty:
+    Hs = np.sort(near.loc[near["stable"],"H"].values)
+    if Hs.size:
+        distinct=1
+        for i in range(1,len(Hs)):
+            if abs(Hs[i]-Hs[i-1])>1e-3:
+                distinct+=1
+bistable = (distinct>=2)
+
+# ---- Basins at baseline
+def relax(y0,T=360):
+    sol=solve_ivp(lambda t,z: rhs(z,p,d_fit),(0,T),y0,t_eval=np.linspace(0,T,900),
+                  rtol=1e-6, atol=1e-8, max_step=0.5)
+    return sol.y[:,-1]
+
+Hs = np.linspace(0.20, 0.95, 19)
+qs = np.linspace(0.0, 1.0, 19)
+Z = np.zeros((len(Hs), len(qs)))
+for i,H0 in enumerate(Hs):
+    for j,q0 in enumerate(qs):
+        y0 = np.array([0.12,0.12,H0,0.10,q0], float)
+        yss = relax(y0)
+        Z[i,j] = yss[2]
+
+plt.figure(figsize=(6.8,5.4))
+plt.imshow(Z, origin="lower", extent=[qs[0],qs[-1],Hs[0],Hs[-1]],
+           aspect="auto", vmin=0.4, vmax=1.0, cmap="viridis")
+plt.colorbar(label="Final H (steady)")
+plt.xlabel("initial q"); plt.ylabel("initial H")
+plt.title(f"Basins at baseline d={d_fit:.3f} | Bistable? {'YES' if bistable else 'NO'}")
+plt.tight_layout(); plt.savefig(os.path.join(OUT,"basins_heatmap.png"), dpi=180); plt.close()
+
+with open(os.path.join(OUT,"diagnosis.txt"),"w") as f:
+    f.write(f"Baseline d = {d_fit:.5f}\n")
+    f.write(f"Distinct stable equilibria at baseline: {distinct}\n")
+    f.write(f"Bistable at baseline? {'YES' if bistable else 'NO'}\n")
+
+print("Saved ->", OUT, "| Bistable at baseline? ", "YES" if bistable else "NO")
+

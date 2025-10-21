@@ -1,0 +1,248 @@
+# === Build SCFA-wide table from subjects/samples + metabolite matrix + metadata (raw + scored + smoothed H_proxy) ===
+# ---------------------------------------------------------------------------------------------------------------
+import pandas as pd, numpy as np, re, os
+from pathlib import Path
+from datetime import datetime
+
+# ---- Input/Output paths ----
+SUBJECTS_FILE = Path("timeseries/metabolomics_subject_samples.csv")
+METAB_FILE    = Path("timeseries/metabolomics_samples.csv")
+OUT_DIR       = Path("timeseries")
+OUT_DIR.mkdir(parents=True, exist_ok=True)
+OUT_RAW       = OUT_DIR / "combined_scfas_table_raw.csv"
+OUT_SCORED    = OUT_DIR / "combined_scfas_table_scored.csv"
+
+# ---------------------------------------------------------------------------------------------------------------
+# Basic helpers
+# ---------------------------------------------------------------------------------------------------------------
+def detect_col(df, candidates):
+    cl = {c.lower(): c for c in df.columns}
+    for k in candidates:
+        if k.lower() in cl:
+            return cl[k.lower()]
+    return None
+
+def norm_key(s):
+    return re.sub(r'[\s\-_/]', '', str(s).strip().lower())
+
+def parse_date_loose(s):
+    if not s or pd.isna(s):
+        return np.nan
+    s = str(s).strip()
+    fmts = ["%m/%d/%Y","%m/%d/%y","%Y-%m-%d","%d/%m/%Y","%d-%m-%Y","%Y.%m.%d"]
+    for fmt in fmts:
+        try:
+            return datetime.strptime(s, fmt).date().isoformat()
+        except Exception:
+            pass
+    return s
+
+# ---------------------------------------------------------------------------------------------------------------
+# 1) Read subject-sample metadata
+# ---------------------------------------------------------------------------------------------------------------
+df_subj = pd.read_csv(SUBJECTS_FILE)
+subject_col = detect_col(df_subj, ["Subject_ID","Subject","Participant_ID","patient_id","subject id"])
+sample_col  = detect_col(df_subj, ["Sample_ID","Sample","local_sample_id","Sample name","SM_ID","SM"])
+details_col = detect_col(df_subj, ["Details","detail","notes","metadata"])
+if sample_col is None:
+    for c in df_subj.columns:
+        if any(str(v).startswith("SM-") for v in df_subj[c].astype(str).head(50)):
+            sample_col = c
+            break
+
+# ---------------------------------------------------------------------------------------------------------------
+# 2) Parse metadata into raw dicts and scored features
+# ---------------------------------------------------------------------------------------------------------------
+def parse_metadata_string(meta_str):
+    s = re.sub(r"\|", ";", str(meta_str))
+    s = re.sub(r"\s*;\s*", ";", s)
+    pairs = re.split(r";\s*", s.strip())
+    out = {}
+    for p in pairs:
+        if "=" in p:
+            k, v = p.split("=", 1)
+        elif ":" in p:
+            k, v = p.split(":", 1)
+        else:
+            continue
+        out[k.strip()] = v.strip()
+    return out
+
+freq_map = {
+    "No, I did not consume": 0.0,
+    "Within the past 4 to 7 days": 0.25,
+    "Within the past 2 to 3 days": 0.5,
+    "Yesterday, 1 to 2 times": 0.75,
+    "Yesterday, 3 or more times": 1.0,
+    "Yesterday": 0.75
+}
+wellbeing_map = {"Well": 1.0, "Slightly below par": 0.8, "Poor": 0.4, "Very poor": 0.2}
+yn_map = {"Yes": 1, "No": 0, "-": np.nan}
+
+def extract_features(meta_dict):
+    feat = {}
+    # demographics
+    try:
+        feat["Age"] = float(meta_dict.get("Age", np.nan))
+    except:
+        feat["Age"] = np.nan
+    feat["Sex_Female"] = 1 if "Female" in meta_dict.get("sex", "") else 0
+    feat["Wellbeing"] = wellbeing_map.get(meta_dict.get("General wellbeing", ""), np.nan)
+
+    # disease activity
+    for k in ["HBI", "SCCAI", "Fecal Calprotectin", "CRP"]:
+        v = meta_dict.get(k, "")
+        if re.search(r"[0-9]", v):
+            feat[k.replace(" ", "_")] = float(re.findall(r"[0-9.]+", v)[0])
+        else:
+            feat[k.replace(" ", "_")] = np.nan
+
+    # meds
+    for k in ["Antibiotics", "Immunosuppressants (e.g. oral corticosteroids)"]:
+        match = [kk for kk in meta_dict if k.lower().split()[0] in kk.lower()]
+        if match:
+            val = meta_dict[match[0]]
+            feat[k.split()[0]] = yn_map.get(val.split()[0], np.nan)
+
+    # probiotic treated as frequency (not binary)
+    v_pro = ""
+    for kk in meta_dict:
+        if "probiotic" in kk.lower():
+            v_pro = meta_dict[kk]
+            break
+    val = 0.0
+    for kstr, sc in freq_map.items():
+        if kstr in v_pro:
+            val = sc
+            break
+    feat["Probiotic_freq"] = val
+
+    # diet freq
+    diet_vars = ["Yogurt","Dairy","Fruits","Vegetables","Beans","Whole grains",
+                 "Starch","Sweets","Alcohol","Fish","White meat","Red meat"]
+    for d in diet_vars:
+        v = ""
+        for k in meta_dict:
+            if d.lower() in k.lower():
+                v = meta_dict[k]
+                break
+        val = 0.0
+        for kstr, sc in freq_map.items():
+            if kstr in v:
+                val = sc
+                break
+        feat[d.replace(" ", "_") + "_freq"] = val
+
+    # derived scores
+    fiber_keys = ["Fruits_freq","Vegetables_freq","Beans_freq","Whole_grains_freq","Starch_freq"]
+    feat["Fiber_score"] = np.nanmean([feat.get(k, 0) for k in fiber_keys])
+    feat["Protein_score"] = np.nanmean(
+        [feat.get("White_meat_freq", 0), feat.get("Red_meat_freq", 0), feat.get("Fish_freq", 0)]
+    )
+    feat["Probiotic_score"] = feat.get("Yogurt_freq", 0) + feat.get("Probiotic", 0)
+
+    # --- Robust H_proxy (no FCP needed) ---
+    hbi = feat.get("HBI", np.nan)
+    sccai = feat.get("SCCAI", np.nan)
+    well = feat.get("Wellbeing", np.nan)
+    crp = feat.get("CRP", np.nan)
+    pain = {"None": 1.0, "Mild": 0.8, "Moderate": 0.5, "Severe": 0.2}.get(meta_dict.get("Abdominal pain", ""), np.nan)
+    stool = meta_dict.get("Number of liquid or very soft stools in the past 24 hours:", "")
+    try:
+        stool_val = float(re.findall(r"[0-9.]+", stool)[0]) if re.search(r"[0-9]", stool) else np.nan
+    except:
+        stool_val = np.nan
+
+    inv_hbi = 1 - np.clip(hbi / 20, 0, 1) if not np.isnan(hbi) else np.nan
+    inv_sccai = 1 - np.clip(sccai / 19, 0, 1) if not np.isnan(sccai) else np.nan
+    inv_crp = 1 - np.clip(crp / 50, 0, 1) if not np.isnan(crp) else np.nan
+    stool_term = 1 - np.clip(stool_val / 5, 0, 1) if not np.isnan(stool_val) else np.nan
+
+    vals = [v for v in [inv_hbi, inv_sccai, inv_crp, well, pain, stool_term] if not np.isnan(v)]
+    base_H = np.nanmean(vals) if vals else np.nan
+
+    feat["H_proxy_meta"] = np.clip(base_H, 0, 1) if not np.isnan(base_H) else np.nan
+    return feat
+
+# Apply to all
+meta_dicts = df_subj.get(details_col, pd.Series([""] * len(df_subj))).map(parse_metadata_string)
+raw_df = pd.json_normalize(meta_dicts).fillna("")
+feat_df = pd.json_normalize(meta_dicts.map(extract_features))
+
+# ---------------------------------------------------------------------------------------------------------------
+# 3) Combine with IDs
+# ---------------------------------------------------------------------------------------------------------------
+id_df = pd.DataFrame({
+    "sample_id": df_subj[sample_col].astype(str),
+    "subject_id": df_subj[subject_col].astype(str)
+})
+raw_full = pd.concat([id_df, raw_df], axis=1)
+score_full = pd.concat([id_df, feat_df], axis=1)
+
+# ---------------------------------------------------------------------------------------------------------------
+# 4) Metabolite matrix
+# ---------------------------------------------------------------------------------------------------------------
+df_met = pd.read_csv(METAB_FILE)
+met_name_col = detect_col(df_met, ["metabolite_name","metabolite","compound","name"])
+sample_cols = [c for c in df_met.columns if c.startswith("SM-")]
+if met_name_col is None or not sample_cols:
+    raise ValueError("Could not detect metabolite name column or any SM-* sample columns.")
+
+df_met["_name_key"] = df_met[met_name_col].map(norm_key)
+SCFA_ALIASES = {
+    "acetate":{"acetate","acetic acid","aceticacid"},
+    "propionate":{"propionate","propionic acid","propionicacid"},
+    "butyrate":{"butyrate","butyric acid","butyricacid"},
+    "isobutyrate":{"isobutyrate","2-methylpropionate","isobutyric acid","isobutyricacid"},
+    "isovalerate":{"isovalerate","3-methylbutyrate","isovaleric acid","isovalericacid"},
+    "valerate":{"valerate","pentanoate","valeric acid","valericacid"},
+    "caproate":{"caproate","hexanoate","caproic acid","caproicacid"},
+    "lactate":{"lactate"}
+}
+alias_to_canon = {norm_key(n): canon for canon, names in SCFA_ALIASES.items() for n in names}
+df_met["scfa_label"] = df_met["_name_key"].map(alias_to_canon)
+scfa_rows = df_met[df_met["scfa_label"].notna()].copy()
+canonical_order = ["acetate","propionate","butyrate","isobutyrate","isovalerate","valerate","caproate"]
+
+if len(scfa_rows) > 0:
+    long = scfa_rows.melt(id_vars=["scfa_label"], value_vars=sample_cols,
+                          var_name="sample_id", value_name="intensity")
+    wide = long.pivot_table(index="sample_id", columns="scfa_label",
+                            values="intensity", aggfunc="first")
+    wide = wide.reindex(columns=[c for c in canonical_order if c in wide.columns])
+else:
+    wide = pd.DataFrame(columns=canonical_order, index=sample_cols)
+wide = wide.reset_index()
+
+# ---------------------------------------------------------------------------------------------------------------
+# 5) Merge + sort
+# ---------------------------------------------------------------------------------------------------------------
+df_raw_final   = wide.merge(raw_full, on="sample_id", how="left")
+df_score_final = wide.merge(score_full, on="sample_id", how="left")
+
+# Add within-subject EWMA smoothing for H_proxy_meta
+if "H_proxy_meta" in df_score_final.columns:
+    df_score_final["H_proxy_meta_smooth"] = np.nan
+    for sid, subdf in df_score_final.groupby("subject_id"):
+        idx = subdf.index
+        h = subdf["H_proxy_meta"]
+        if h.notna().sum() >= 2:
+            smoothed = h.fillna(method="ffill").ewm(alpha=0.3).mean()  # ~3-sample half-life
+            df_score_final.loc[idx, "H_proxy_meta_smooth"] = smoothed
+        else:
+            df_score_final.loc[idx, "H_proxy_meta_smooth"] = h
+
+# Sort before saving
+def sort_and_save(df, path):
+    wk = df["subject_id"].astype(str).rank(method="dense")
+    df_sorted = df.sort_values(["subject_id","sample_id"]).reset_index(drop=True)
+    df_sorted.to_csv(path, index=False)
+    print(f"✅ Wrote {path} ({df_sorted.shape[0]} rows, {df_sorted.shape[1]} columns)")
+
+sort_and_save(df_raw_final, OUT_RAW)
+sort_and_save(df_score_final, OUT_SCORED)
+
+print("\nFinal files include:")
+print(" • combined_scfas_table_raw.csv   → full text responses + SCFAs")
+print(" • combined_scfas_table_scored.csv → numeric features + robust H_proxy_meta + smoothed version\n")
+
