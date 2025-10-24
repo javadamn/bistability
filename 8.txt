@@ -1,0 +1,130 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.integrate import solve_ivp
+import os
+
+print("--- 🚀 Starting Final Intervention Analysis (v6) ---")
+
+# --- 1. CONFIGURATION ---
+PARAMS_FILE = "mw_fit_out_v6_SIMPLE_GLOBAL/fitted_global_params_v6.csv"
+OUTDIR = "mw_analysis_v6_FINAL_Interventions"
+os.makedirs(OUTDIR, exist_ok=True)
+
+# --- 2. LOAD PARAMETERS ---
+try:
+    gdf = pd.read_csv(PARAMS_FILE, index_col=0, header=None).squeeze("columns")
+except FileNotFoundError as e:
+    print(f"❌ Error: Could not find parameter file at {PARAMS_FILE}")
+    raise e
+
+print("✅ Loaded v6 parameters successfully.")
+param_names = ["r_max","K_M","c","d","g","u","p_low","p_high","H_on","H_off","tau_q"]
+p_vec = np.array([gdf[k] for k in param_names])
+d_baseline = gdf['d']
+
+# --- 3. MODEL DEFINITION (from 1.txt) ---
+def rhs_mem(t, y, p_vec, d_override=None):
+    M, H, B, q = y
+    r_max, K_M, c, d, g, u, pL, pH, H_on, H_off, tau = p_vec
+    if d_override is not None: d = d_override
+    pB = pL + (pH - pL)*np.clip(q, 0, 1)
+    dM = (r_max - c*pB)*M*(1 - M/K_M)
+    dH = g*B*(1 - H) - d*H
+    dB = pB*M - u*H*B
+    if H < H_on: qinf=1.0
+    elif H > H_off: qinf=0.0
+    else: qinf=q
+    dq = (qinf - q)/tau
+    return [dM, dH, dB, dq]
+
+# --- 4. RUN INTERVENTION SIMULATIONS (FIXED) ---
+print("Running intervention simulations...")
+
+# Find the "dysbiotic" steady state to start from
+y0_sick = np.array([0.1, 0.1, 0.1, 1.0], dtype=float) # Sick start
+sol_ss = solve_ivp(lambda t,y: rhs_mem(t,y,p_vec, d_baseline), (0,360), y0_sick, t_eval=[360])
+y_dysbiotic = sol_ss.y[:,-1]
+print(f"   Starting from stable dysbiotic state (H = {y_dysbiotic[1]:.3f})")
+
+# Simulation settings
+T_total = 100.0
+t_intervene_start = 20.0
+t_intervene_end = 30.0 # 10-hour duration
+t_span = (0, T_total)
+t_eval = np.linspace(0, T_total, 200)
+results_df = pd.DataFrame({'time': t_eval})
+
+# --- Intervention 1: Anti-inflammatory (No change, this was correct) ---
+d_treatment = d_baseline * 0.5 
+def rhs_anti_inflam(t, y):
+    d_val = d_treatment if t_intervene_start <= t < t_intervene_end else d_baseline
+    return rhs_mem(t, y, p_vec, d_override=d_val)
+    
+sol_inflam = solve_ivp(rhs_anti_inflam, t_span, y_dysbiotic, t_eval=t_eval)
+results_df['H_anti_inflammatory'] = sol_inflam.y[1] # H is index 1
+
+# ---
+# === BUG FIX FOR INTERVENTIONS 2 & 3 HERE ===
+# ---
+# Split the time grid for pre/post simulations
+t_eval_pre = t_eval[t_eval <= t_intervene_start]
+t_eval_post = t_eval[t_eval > t_intervene_start]
+# ---
+
+# --- Intervention 2: Probiotic (FIXED) ---
+PROBIOTIC_DOSE = 0.8 
+# Simulate 'pre' on the 'pre' time grid
+sol_pre = solve_ivp(lambda t,y: rhs_mem(t,y,p_vec, d_baseline), (0, t_intervene_start), y_dysbiotic, t_eval=t_eval_pre)
+y_dose = sol_pre.y[:, -1].copy()
+y_dose[0] += PROBIOTIC_DOSE # Add dose to M (index 0)
+# Simulate 'post' on the 'post' time grid
+sol_post = solve_ivp(lambda t,y: rhs_mem(t,y,p_vec, d_baseline), (t_intervene_start, T_total), y_dose, t_eval=t_eval_post)
+# Combine the results. This will now have exactly 200 points.
+results_df['H_probiotic_dose'] = np.concatenate((sol_pre.y[1], sol_post.y[1]))
+
+# --- Intervention 3: Postbiotic (FIXED) ---
+POSTBIOTIC_DOSE = 0.5
+# We can re-use sol_pre from the previous step
+y_dose = sol_pre.y[:, -1].copy() 
+y_dose[2] += POSTBIOTIC_DOSE # Add dose to B (index 2)
+# Simulate 'post' on the 'post' time grid
+sol_post = solve_ivp(lambda t,y: rhs_mem(t,y,p_vec, d_baseline), (t_intervene_start, T_total), y_dose, t_eval=t_eval_post)
+# Combine the results. This will also have 200 points.
+results_df['H_postbiotic_dose'] = np.concatenate((sol_pre.y[1], sol_post.y[1]))
+
+# Save data
+csv_file = os.path.join(OUTDIR, "intervention_simulations_FINAL.csv")
+results_df.to_csv(csv_file, index=False)
+print(f"✅ Saved intervention data to {csv_file}")
+
+# --- 5. PLOT INTERVENTIONS ---
+fig, ax = plt.subplots(3, 1, figsize=(10, 12), sharex=True)
+
+# Plot 1: Anti-inflammatory
+ax[0].plot(results_df['time'], results_df['H_anti_inflammatory'], lw=2.5, label="Host Health (H)")
+ax[0].axvspan(t_intervene_start, t_intervene_end, color='red', alpha=0.2, label=f"Lower d (to {d_treatment:.3f})")
+ax[0].set_title("Intervention 1: Anti-inflammatory")
+ax[0].set_ylabel("Host Health ($H$)"); ax[0].set_ylim(-0.05, 1.05)
+ax[0].legend(); ax[0].grid(True, ls=":")
+
+# Plot 2: Probiotic
+ax[1].plot(results_df['time'], results_df['H_probiotic_dose'], lw=2.5, label="Host Health (H)", color='blue')
+ax[1].axvline(t_intervene_start, color='blue', alpha=0.5, ls='--', label=f"Probiotic Dose (M += {PROBIOTIC_DOSE})")
+ax[1].set_title("Intervention 2: Probiotic Dose")
+ax[1].set_ylabel("Host Health ($H$)"); ax[1].set_ylim(-0.05, 1.05)
+ax[1].legend(); ax[1].grid(True, ls=":")
+
+# Plot 3: Postbiotic
+ax[2].plot(results_df['time'], results_df['H_postbiotic_dose'], lw=2.5, label="Host Health (H)", color='green')
+ax[2].axvline(t_intervene_start, color='green', alpha=0.5, ls='--', label=f"Postbiotic Dose (B += {POSTBIOTIC_DOSE})")
+ax[2].set_title("Intervention 3: Postbiotic Dose")
+ax[2].set_ylabel("Host Health ($H$)"); ax[2].set_ylim(-0.05, 1.05)
+ax[2].set_xlabel("Time"); ax[2].legend(); ax[2].grid(True, ls=":")
+
+plt.tight_layout()
+plot_file = os.path.join(OUTDIR, "intervention_simulations_FINAL.png")
+plt.savefig(plot_file, dpi=180)
+plt.close()
+print(f"✅ Saved intervention plots to {plot_file}")
+print(f"\n--- 🎉 All analyses complete! Check the folder: {OUTDIR} ---")

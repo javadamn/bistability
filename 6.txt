@@ -1,0 +1,226 @@
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from scipy.integrate import solve_ivp
+from scipy.optimize import differential_evolution # GLOBAL OPTIMIZER
+import time
+
+# ---
+# === PART 1: FITTING SCRIPT (v6 - SIMPLE MODEL + GLOBAL FIT) ===
+# ---
+print("--- 🚀 Starting 'Global Simple Model Fit' (v6) ---")
+print("--- This will be VERY SLOW. Please be patient. ---")
+
+INPATH = "timeseries/combined_scfas_table_scored.csv"
+OUTDIR = "mw_fit_out_v6_SIMPLE_GLOBAL" # New output directory
+os.makedirs(OUTDIR, exist_ok=True)
+NEW_PARAMS_FILE = os.path.join(OUTDIR, "fitted_global_params_v6.csv")
+
+H_COLS = ["H_proxy_meta_smooth", "H_proxy_meta"]
+SCFA = ["butyrate"]
+MIN_ROWS = 4
+PENALTY = 1e3
+BISTABILITY_PENALTY = 1e4 # Massive penalty for non-bistable solutions
+
+# ---
+# === MODEL & PARAMETERS from your 1.txt SCRIPT ===
+# ---
+PARAM_NAMES = ["r_max","K_M","c","d","g","u","p_low","p_high","H_on","H_off","tau_q"]
+
+# Priors (wide, for global search)
+# We use the parameters from your 1.txt 'x0g' as the center of our priors
+PRIOR = {
+    "r_max": (0.32, 0.15), "K_M": (1.0, 0.3), "c": (0.10, 0.05),
+    "d": (0.12, 0.06), "g": (0.5, 0.2), "u": (0.6, 0.2),
+    "p_low": (0.1, 0.05), "p_high": (2.5, 0.8), "H_on": (0.55, 0.1),
+    "H_off": (0.70, 0.1), "tau_q": (4.0, 2.0)
+}
+
+# Bounds (LBg/UBg from 1.txt)
+LBg_simple = np.array([0.1, 0.4, 0.02, 0.01, 0.05, 0.2, 0.0, 0.5, 0.2, 0.3, 0.5])
+UBg_simple = np.array([0.6, 1.5, 0.25, 0.5 , 2.0 , 1.2, 0.8, 4.0, 0.8, 0.95, 24.0])
+
+# --- Data Prep (unchanged) ---
+df = pd.read_csv(INPATH)
+Hcol = next((c for c in H_COLS if c in df.columns), None)
+if Hcol is None: raise ValueError("Need H proxy col")
+df = df[["subject_id", "sample_id", Hcol] + SCFA].dropna(subset=["subject_id", "sample_id"]).copy()
+df["t_idx"] = df.groupby("subject_id").cumcount().astype(float)
+
+def robust_z(s): # Renamed from robust_mad_scale
+    x = s.astype(float).to_numpy(); m = np.isfinite(x)
+    if m.sum() == 0: return pd.Series(np.zeros_like(x), index=s.index)
+    xm = x[m]; med = np.median(xm); mad = np.median(np.abs(xm - med))
+    scale = mad if mad > 1e-9 else (np.percentile(xm, 75) - np.percentile(xm, 25) or np.std(xm) + 1e-9)
+    return pd.Series((x - med) / (scale + 1e-9), index=s.index)
+
+df["B_z"] = df.groupby("subject_id")[SCFA[0]].transform(robust_z)
+df["H_obs"] = df[Hcol].clip(0, 1)
+
+subs = []
+for sid, sub in df.groupby("subject_id"):
+    sub = sub.sort_values("t_idx")
+    if len(sub) < MIN_ROWS: continue
+    t = sub["t_idx"].to_numpy(float)
+    B = sub["B_z"].to_numpy(float); H = sub["H_obs"].to_numpy(float)
+    mB = np.isfinite(B); mH = np.isfinite(H)
+    if mB.sum() < 3 or mH.sum() < 3: continue
+    def first(a, d):
+        a = np.asarray(a, float); idx = np.where(np.isfinite(a))[0]
+        return float(a[idx[0]]) if len(idx) else float(d)
+    subs.append({"sid": sid, "t": t, "B": B, "H": H, "maskB": mB, "maskH": mH,
+                 "nB": int(mB.sum()), "nH": int(mH.sum()),
+                 "H0": float(np.clip(first(H, 0.6), 0, 1)),
+                 "B0": float(max(0.05, first(B, 0.1)))})
+if not subs: raise RuntimeError("no subjects")
+print(f"Loaded {len(subs)} subjects for fitting.")
+
+# --- Model (RHS from 1.txt) ---
+def rhs_simple_model(t, y, p):
+    M, H, B, q = y
+    r_max, K_M, c, d, g, u, pL, pH, H_on, H_off, tau = p
+    pB = pL + (pH - pL)*np.clip(q, 0, 1)
+    dM = (r_max - c*pB)*M*(1 - M/K_M)
+    dH = g*B*(1 - H) - d*H
+    dB = pB*M - u*H*B
+    if H < H_on:
+        q_inf = 1.0
+    elif H > H_off:
+        q_inf = 0.0
+    else:
+        q_inf = q # Hold
+    dq = (q_inf - q) / tau
+    return [dM, dH, dB, dq]
+
+def simulate(ts, y0, p):
+    try:
+        sol = solve_ivp(lambda t, z: rhs_simple_model(t, z, p), (ts[0], ts[-1]), y0, t_eval=ts,
+                      rtol=1e-6, atol=1e-8, max_step=0.5)
+        if not sol.success: return np.vstack([np.full(len(ts), np.nan)] * 4)
+        return sol.y
+    except Exception:
+        return np.vstack([np.full(len(ts), np.nan)] * 4)
+
+# per-subject obs maps
+x0s = []; LBs_s = []; UBs_s = []
+for _ in subs: x0s += [1.0, 0.0, 1.0]; LBs_s += [0.1, -0.5,  0.1]; UBs_s += [5.0,  0.5,  2.0]
+# Combine ALL bounds into a single list of tuples
+LB = np.concatenate([LBg_simple, np.array(LBs_s, float)])
+UB = np.concatenate([UBg_simple, np.array(UBs_s, float)])
+full_bounds_list = list(zip(LB, UB))
+
+def unpack(x):
+    gpar = x[:len(PARAM_NAMES)]
+    triples = np.split(x[len(PARAM_NAMES):], len(subs))
+    return gpar, triples
+
+W_B, W_H = 0.6, 1.2 # Weights from 3.txt (seem reasonable)
+
+# --- Bistability Checker (adapted for 4-state model) ---
+def check_bistability(pvec):
+    try:
+        d_baseline = pvec[PARAM_NAMES.index('d')]
+        # y = [M, H, B, q]
+        y0_healthy = np.array([0.1, 0.9, 0.1, 0.0], float)
+        sol_h = solve_ivp(lambda t, z: rhs_simple_model(t, z, pvec), (0, 360), y0_healthy,
+                          t_eval=[360], rtol=1e-6, atol=1e-8)
+        H_final_healthy = sol_h.y[1, -1] if sol_h.success else -99
+        
+        y0_sick = np.array([0.1, 0.2, 0.1, 1.0], float)
+        sol_s = solve_ivp(lambda t, z: rhs_simple_model(t, z, pvec), (0, 360), y0_sick,
+                          t_eval=[360], rtol=1e-6, atol=1e-8)
+        H_final_sick = sol_s.y[1, -1] if sol_s.success else -99
+        
+        if (H_final_healthy > 0.8) and (H_final_sick < 0.5) and ((H_final_healthy - H_final_sick) > 0.3):
+            return True
+        else:
+            return False
+    except Exception:
+        return False
+
+# ---
+# === NEW COST FUNCTION for differential_evolution ===
+# ---
+def cost_function_for_de(x):
+    gpar, triples = unpack(x)
+    total_cost = 0.0
+    
+    # --- 1. Bistability Penalty ---
+    if not (gpar[PARAM_NAMES.index('H_off')] > gpar[PARAM_NAMES.index('H_on')]): 
+        return PENALTY * 1e6 # Base parameter violation
+    
+    if not check_bistability(gpar):
+        total_cost += BISTABILITY_PENALTY
+
+    # --- 2. Data-fitting cost ---
+    for S, tr in zip(subs, triples):
+        alpha_B, beta0, beta1 = tr
+        ts = S["t"]; H0 = np.clip(S["H0"], 0, 1); B0 = max(0.05, S["B0"])
+        M0 = 0.1; q0 = 1.0 if H0 < gpar[PARAM_NAMES.index('H_on')] else 0.0
+        y0 = [M0, H0, B0, q0] # [M, H, B, q]
+        Y = simulate(ts, y0, gpar)
+        
+        if np.any(~np.isfinite(Y)):
+            total_cost += PENALTY * (S["nB"] + S["nH"])
+            continue
+            
+        M, H, B, q = Y
+        Bhat = alpha_B * B
+        Hhat = np.clip(beta0 + beta1*H, 0, 1)
+        
+        res_B = W_B * (Bhat[S["maskB"]] - S["B"][S["maskB"]])
+        res_H = W_H * (Hhat[S["maskH"]] - S["H"][S["maskH"]])
+        total_cost += np.sum(res_B**2) + np.sum(res_H**2)
+
+    # --- 3. Prior cost ---
+    idx = {nm: i for i, nm in enumerate(PARAM_NAMES)}
+    for nm, (mu, sd) in PRIOR.items():
+        prior_cost = ((gpar[idx[nm]] - mu) / (sd + 1e-9))**2
+        total_cost += prior_cost
+        
+    return total_cost
+
+# ---
+# === RUN THE GLOBAL FIT ===
+# ---
+print(f"--- Starting Global Fit (using {len(full_bounds_list)} parameters)... ---")
+print(f"This may take 30-60+ minutes. Start time: {time.ctime()}")
+
+fit = differential_evolution(
+    cost_function_for_de, 
+    bounds=full_bounds_list,
+    strategy='best1bin',
+    maxiter=500,       # Max iterations
+    popsize=15,        
+    tol=0.01, 
+    mutation=(0.5, 1), 
+    recombination=0.7, 
+    seed=1,
+    disp=True,         # Print progress
+    polish=True        
+)
+
+print("\n--- Fit complete. ---")
+
+gpar_hat, _ = unpack(fit.x)
+pd.Series(gpar_hat, index=PARAM_NAMES).to_csv(NEW_PARAMS_FILE, header=False)
+print("[info] new globals (v6):", dict(zip(PARAM_NAMES, gpar_hat)))
+print(f"✅ Saved new parameters to: {NEW_PARAMS_FILE}")
+
+# ---
+# === PART 2: FINAL VALIDATION ===
+# ---
+print("\n" + "="*30 + "\n")
+print(f"--- PART 2: Validating new parameters ---")
+
+final_params_are_bistable = check_bistability(gpar_hat)
+
+if final_params_are_bistable:
+    print("✅✅✅ SUCCESS: The final fitted parameters are BISTABLE.")
+    print("You can now write a simple analysis script (like your 2.txt) to plot the hysteresis loop.")
+else:
+    print("❌❌❌ FAILURE: The Global Optimizer could not find a bistable solution.")
+    print("If this failed, it is the strongest evidence that your data does not support your hypothesis with this model.")
+
+print(f"\n--- 🎉 'Fit-and-Test' v6 complete! ---")

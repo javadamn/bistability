@@ -1,0 +1,141 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.integrate import solve_ivp
+import os
+
+print("--- 🚀 Starting Final Analysis (v6) ---")
+
+# --- 1. CONFIGURATION ---
+# Path to the parameters from your successful v6 fit
+PARAMS_FILE = "fitted_global_params_v6.csv"
+OUTDIR = "mw_analysis_v6_FINAL"
+os.makedirs(OUTDIR, exist_ok=True)
+
+# --- 2. LOAD PARAMETERS ---
+try:
+    gdf = pd.read_csv(PARAMS_FILE, index_col=0, header=None).squeeze("columns")
+except FileNotFoundError:
+    print(f"❌ Error: Could not find parameter file at {PARAMS_FILE}")
+    print("Please make sure the v6 parameter file is in the same directory.")
+    exit()
+
+print("✅ Loaded parameters successfully.")
+param_names = ["r_max","K_M","c","d","g","u","p_low","p_high","H_on","H_off","tau_q"]
+globals_summary = gdf.to_dict()
+print(globals_summary)
+
+# --- 3. MODEL DEFINITION (from 1.txt) ---
+# This is the simple model RHS
+def rhs_mem(t, y, p_vec, d_override=None):
+    M, H, B, q = y
+    r_max, K_M, c, d, g, u, pL, pH, H_on, H_off, tau = p_vec
+    
+    if d_override is not None:
+        d = d_override
+        
+    pB = pL + (pH - pL)*np.clip(q, 0, 1)
+    dM = (r_max - c*pB)*M*(1 - M/K_M)
+    dH = g*B*(1 - H) - d*H
+    dB = pB*M - u*H*B
+    
+    if H < H_on: qinf=1.0
+    elif H > H_off: qinf=0.0
+    else: qinf=q
+    dq = (qinf - q)/tau
+    return [dM, dH, dB, dq]
+
+# Get the full parameter vector in the correct order
+p_vec = np.array([gdf[k] for k in param_names])
+d_baseline = gdf['d'] # The fitted baseline 'd'
+
+# --- 4. HYSTERESIS SWEEP (from 2.txt) ---
+print("Running hysteresis sweep (S-curve)...")
+
+def simulate_to_ss(d_val, y0, T=200):
+    sol = solve_ivp(lambda t,y: rhs_mem(t,y,p_vec, d_val), (0,T), y0, 
+                    t_eval=[T], # Only need the final point
+                    rtol=1e-6, atol=1e-8, max_step=0.5)
+    return sol.y[:,-1]
+
+# Sweep 'd' over a wide range around the baseline
+d_grid = np.linspace(d_baseline * 0.5, d_baseline * 2.5, 60)
+y_healthy = np.array([0.1, 0.9, 0.1, 0.0], dtype=float) # Healthy start
+y_sick = np.array([0.1, 0.1, 0.1, 1.0], dtype=float)    # Sick start
+
+fwd = [] # Forward sweep (starting healthy)
+for d in d_grid:
+    y_healthy = simulate_to_ss(d, y_healthy, T=200)
+    fwd.append((d, *y_healthy))
+
+bwd = [] # Backward sweep (starting sick)
+for d in d_grid[::-1]:
+    y_sick = simulate_to_ss(d, y_sick, T=200)
+    bwd.append((d, *y_sick))
+
+fwd_df = pd.DataFrame(fwd, columns=["d","M","H","B","q"])
+bwd_df = pd.DataFrame(bwd, columns=["d","M","H","B","q"])
+# Save the data
+fwd_df.to_csv(os.path.join(OUTDIR, "sweep_forward_data.csv"), index=False)
+bwd_df.to_csv(os.path.join(OUTDIR, "sweep_backward_data.csv"), index=False)
+
+# Plot hysteresis
+fig, ax = plt.subplots(2,1, figsize=(7,8), sharex=True)
+ax[0].plot(fwd_df["d"], fwd_df["H"], marker="o", ms=4, label="Forward (d↑, start healthy)")
+ax[0].plot(bwd_df["d"], bwd_df["H"], marker="s", ms=4, label="Backward (d↓, start sick)")
+ax[0].axhline(gdf["H_on"], ls=":", c="gray", label=f"H_on ({gdf['H_on']:.2f})")
+ax[0].axhline(gdf["H_off"], ls="--", c="gray", label=f"H_off ({gdf['H_off']:.2f})")
+ax[0].axvline(d_baseline, ls="--", c="green", label=f"Baseline d ({d_baseline:.3f})")
+ax[0].set_ylabel("Host Health (H*)"); ax[0].grid(True, ls=":"); ax[0].legend()
+ax[0].set_title("Hysteresis S-Curve")
+
+ax[1].plot(fwd_df["d"], fwd_df["q"], marker="o", ms=4, label="Forward (d↑)")
+ax[1].plot(bwd_df["d"], bwd_df["q"], marker="s", ms=4, label="Backward (d↓)")
+ax[1].set_xlabel("Inflammation Rate (d)"); ax[1].set_ylabel("Memory (q*)"); ax[1].grid(True, ls=":");
+ax[1].legend()
+
+plt.tight_layout()
+plot_file = os.path.join(OUTDIR, "hysteresis_loop_FINAL.png")
+plt.savefig(plot_file, dpi=180)
+plt.close()
+print(f"✅ Saved hysteresis plot to {plot_file}")
+
+# --- 5. BASIN OF ATTRACTION PLOT ---
+print("Running basin of attraction analysis...")
+
+def relax(y0, T=360):
+    # Simulate at the fitted baseline 'd'
+    sol = solve_ivp(lambda t,z: rhs_mem(t,z,p_vec, d_baseline),(0,T),y0,
+                    t_eval=[T], rtol=1e-6, atol=1e-8, max_step=0.5)
+    return sol.y[1,-1] # Return final H
+
+Hs = np.linspace(0.01, 0.99, 30)
+qs = np.linspace(0.0, 1.0, 30)
+Z = np.zeros((len(Hs), len(qs)))
+
+for i,H0 in enumerate(Hs):
+    for j,q0 in enumerate(qs):
+        y0 = np.array([0.1, H0, 0.1, q0], float)
+        Z[i,j] = relax(y0)
+
+# Save basin data
+basin_df = pd.DataFrame(Z, index=Hs, columns=qs)
+basin_df.index.name = 'Initial_H'
+basin_df.columns.name = 'Initial_q'
+basin_df.to_csv(os.path.join(OUTDIR, "basins_heatmap_FINAL.csv"))
+
+plt.figure(figsize=(6.8,5.4))
+plt.imshow(Z, origin="lower", extent=[qs[0],qs[-1],Hs[0],Hs[-1]],
+           aspect="auto", vmin=0.0, vmax=1.0, cmap="viridis")
+plt.colorbar(label="Final H (steady state)")
+plt.xlabel("Initial q (memory)");
+plt.ylabel("Initial H (health)")
+plt.title(f"Basins of Attraction at Baseline d={d_baseline:.3f}")
+plt.tight_layout();
+plot_file = os.path.join(OUTDIR, "basins_heatmap_FINAL.png")
+plt.savefig(plot_file, dpi=180);
+plt.close()
+print(f"✅ Saved basin heatmap to {plot_file}")
+
+print("\n--- 🎉 All analyses complete! ---")
+print(f"Check the new folder: {OUTDIR}")

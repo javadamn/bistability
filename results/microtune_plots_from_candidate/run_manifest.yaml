@@ -1,0 +1,13 @@
+baseline_d: 0.06
+candidates_csv: results/microtune_showcase_adaptive/microtune_candidates_adaptive.csv
+fit_file: mw_fit_out_guild_hard_targets/fitted_global_params.csv
+params_after_scaling:
+  KQ: 150
+  K_u_scale: 1.0
+  N_HILL: 3
+  gamma_scale: 0.9
+  p_high_scale: 1.0
+  rHP_scale: 1.2
+  u_scale: 0.9
+picked_row: 0
+tag: n3_KQ150_ph1.00_rhp1.20_Ku1.00_u0.90_g0.90
