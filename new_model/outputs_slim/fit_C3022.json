@@ -1,0 +1,60 @@
+{
+  "subject": "C3022",
+  "theta_subj_names": [
+    "r_M",
+    "gamma",
+    "sigma_F",
+    "sigma_A",
+    "p_max",
+    "s_B",
+    "a_B"
+  ],
+  "theta_subj": [
+    0.050000000000002036,
+    7.440433204216482e-15,
+    1.4999999999999971,
+    1.495644945601844,
+    0.30000000000000154,
+    0.3550688396415991,
+    4.9999999999999565
+  ],
+  "cost": 116.20596417861678,
+  "nfev": 10,
+  "status": 2,
+  "message": "`ftol` termination condition is satisfied.",
+  "use_logB": true,
+  "logbase": "10",
+  "min_H_points": 3,
+  "globals": {
+    "r_C": 0.7,
+    "K_M": 1.0,
+    "K_C": 1.0,
+    "u": 0.05,
+    "k_B": 0.08,
+    "g": 1.0,
+    "K_B": 0.6,
+    "n": 2.0,
+    "d0": 0.08,
+    "chi": 0.4,
+    "H_I": 0.5,
+    "eta": 6.0,
+    "H_on": 0.3,
+    "H_off": 0.7,
+    "eps": 0.05,
+    "k_on": 0.2,
+    "k_off": 0.2,
+    "p_min": 0.2,
+    "alpha": 0.4,
+    "beta": 0.4
+  },
+  "metrics": {
+    "n_obs_B": 6.0,
+    "RMSE_B": 1.617397720606621,
+    "NRMSE_B": 6.223770673223127,
+    "R2_B": -37.73532139287226,
+    "n_obs_H": 0.0,
+    "RMSE_H": NaN,
+    "NRMSE_H": NaN,
+    "R2_H": NaN
+  }
+}
