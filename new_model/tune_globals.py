@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# tune_globals.py
-import json, copy
+# tune_globals.py  — fixed to always pass a real JSON filepath to fit_subject_slim
+import json, copy, tempfile, os
 from pathlib import Path
 from typing import Dict, List
 import numpy as np
@@ -9,8 +9,7 @@ from scipy.optimize import minimize
 
 from fit_subject_slim import fit_subject_slim
 
-TUNE_KEYS = ["u","k_B","g","K_B","d0","eta"]  # always tuned
-# optional "H_center" is handled specially (converted to H_on/off with fixed gap)
+TUNE_KEYS = ["u","k_B","g","K_B","d0","eta"]  # tuned globals
 
 def load_subjects(csv_path: str, min_obs_b: int, subset: List[str] | None):
     dfm = pd.read_csv(csv_path, parse_dates=["date"])
@@ -35,22 +34,23 @@ def vector_to_globals(x: np.ndarray, base: Dict, gap_width: float, tune_h_center
         g["fixed"][k] = float(x[i])
     if tune_h_center:
         center = float(x[len(TUNE_KEYS)])
+        # enforce in (0,1) and keep gap width
+        center = float(np.clip(center, 0.05, 0.95))
         H_on  = center - gap_width/2
         H_off = center + gap_width/2
-        # clamp into (0,1)
-        H_on  = float(np.clip(H_on,  0.05, 0.95))
-        H_off = float(np.clip(H_off, 0.05, 0.95))
-        if H_on >= H_off:  # ensure order
-            H_on, H_off = H_off-1e-3, H_off
+        # clamp and ensure order
+        H_on  = float(np.clip(H_on,  0.01, 0.99))
+        H_off = float(np.clip(H_off, 0.01, 0.99))
+        if H_on >= H_off:
+            H_on  = max(0.01, H_off - 1e-3)
         g["fixed"]["H_on"]  = H_on
         g["fixed"]["H_off"] = H_off
     return g
 
 def penalty(x, tune_h_center: bool):
+    # soft bounds; keeps optimizer in a plausible region
     pen = 0.0
-    # positivity / reasonable magnitudes
-    # u, k_B, g, K_B, d0, eta
-    lb = np.array([1e-4, 1e-4, 0.05, 0.05, 0.01, 1.0])
+    lb = np.array([1e-4, 1e-4, 0.05, 0.05, 0.01, 1.0])   # u,kB,g,KB,d0,eta
     ub = np.array([2.0,   2.0,   4.0,  3.0,  0.5,  20.0])
     z = x[:len(lb)]
     pen += float(np.sum(np.maximum(0, lb - z)**2 + np.maximum(0, z - ub)**2))
@@ -60,68 +60,68 @@ def penalty(x, tune_h_center: bool):
     return pen
 
 def main():
-    import argparse, tempfile
+    import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("--csv", default="outputs/modeling_table_with_indicators.csv")
     ap.add_argument("--init_globals", default="globals_cohort.json")
     ap.add_argument("--out_json", default="globals_cohort_tuned.json")
-    ap.add_argument("--subjects", nargs="*", default=None, help="subset to tune on; defaults to best-covered subjects")
+    ap.add_argument("--subjects", nargs="*", default=None)
     ap.add_argument("--min_obs_b", type=int, default=5)
-    ap.add_argument("--n_starts", type=int, default=8)
+    ap.add_argument("--n_starts", type=int, default=8, help="per-subject starts during tuning (use smaller to speed up)")
     ap.add_argument("--max_nfev_subj", type=int, default=250)
     ap.add_argument("--logbase", choices=["e","10"], default="10")
     ap.add_argument("--rawB", action="store_true")
     ap.add_argument("--gap_width", type=float, default=0.4)
     ap.add_argument("--tune_h_center", action="store_true")
-    ap.add_argument("--outer_loops", type=int, default=1, help="alternations; 1 is usually enough")
+    ap.add_argument("--outer_loops", type=int, default=1)
+    ap.add_argument("--maxiter", type=int, default=120)
     args = ap.parse_args()
 
     use_logB = (not args.rawB)
     base = json.loads(Path(args.init_globals).read_text())
     subjects = load_subjects(args.csv, args.min_obs_b, args.subjects)
     if not subjects:
-        raise SystemExit("No subjects eligible for tuning (check --min_obs_b and --subjects).")
+        raise SystemExit("No subjects eligible for tuning (check --min_obs_b / --subjects).")
 
     x0 = globals_to_vector(base, args.gap_width, args.tune_h_center)
 
     def obj(x):
-        # penalty to keep in plausible region
-        pen = penalty(x, args.tune_h_center)
+        # Build candidate globals dict
         g_trial = vector_to_globals(x, base, args.gap_width, args.tune_h_center)
+        # Write to a temp file and pass the path to fit_subject_slim
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as tf:
+            json.dump(g_trial, tf)
+            tf.flush()
+            tmp_path = tf.name
         total_cost = 0.0
-        for sid in subjects:
-            try:
+        try:
+            for sid in subjects:
                 fit = fit_subject_slim(
-                    sid, args.csv, globals_json=None,  # pass dict directly below
-                    use_logB=use_logB, logbase=args.logbase,
-                    max_nfev=args.max_nfev_subj, n_starts=args.n_starts
+                    sid,
+                    args.csv,
+                    globals_json=tmp_path,
+                    use_logB=use_logB,
+                    logbase=args.logbase,
+                    max_nfev=args.max_nfev_subj,
+                    n_starts=args.n_starts
                 )
-            except TypeError:
-                # older signature: pass path; create temp file
-                with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as tf:
-                    json.dump(g_trial, tf)
-                    tf.flush()
-                    fit = fit_subject_slim(
-                        sid, args.csv, tf.name,
-                        use_logB=use_logB, logbase=args.logbase,
-                        max_nfev=args.max_nfev_subj, n_starts=args.n_starts
-                    )
-            # Re-run with g_trial by overriding inside fit_subject_slim call (newer versions can accept dict)
-            # If your local fit_subject_slim only takes a path, the tempfile route above covers it.
+                total_cost += float(fit["cost"])
+        finally:
+            # clean up the temp file
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+        # soft penalty keeps search stable
+        return total_cost + 1000.0*penalty(x, args.tune_h_center)
 
-            # We need to re-fit using g_trial. If the function already used base globals, re-call:
-            fit = fit_subject_slim(
-                sid, args.csv, globals_json=json.dumps(g_trial),
-                use_logB=use_logB, logbase=args.logbase,
-                max_nfev=args.max_nfev_subj, n_starts=args.n_starts
-            )
-            total_cost += float(fit["cost"])
-        return total_cost + 1000.0*pen
-
-    # Run outer loops (usually 1 is enough since obj() re-fits per subject every evaluation)
+    # Outer loop: typically 1 is enough since obj() re-fits subjects each evaluation
     x = x0.copy()
     for _ in range(args.outer_loops):
-        res = minimize(obj, x, method="Nelder-Mead", options={"maxiter": 120, "xatol":1e-3, "fatol":1e-2})
+        res = minimize(
+            obj, x, method="Nelder-Mead",
+            options={"maxiter": args.maxiter, "xatol": 1e-3, "fatol": 1e-2}
+        )
         x = res.x
 
     tuned = vector_to_globals(x, base, args.gap_width, args.tune_h_center)
