@@ -1,0 +1,60 @@
+column,n_unique,n_nonnull,examples
+"1) In the past 2 weeks, have you received any of the following medications",3,546,Yes; No; -
+"2) In the past 2 weeks, have you undergone a colonoscopy or other procedure",3,546,No; Yes; -
+"3) In the past 2 weeks, have you used an oral contrast",3,546,Yes; No; -
+"4) In the past 2 weeks, have you had diarrhea?",3,546,Yes; No; -
+"5) In the past 2 weeks, have you been hospitalized?",3,546,No; -; Yes
+6) Have you ever had bowel surgery?,3,546,Yes; No; -
+Abdominal pain,4,422,Mild; Moderate; -; nan; Severe
+Abscess,2,546,No; Yes
+Age at diagnosis,36,546,28; 47; 29; 33; 58; 24; 44; 30; 25; 13
+"Alcohol (beer, brandy, spirits, hard liquor, wine, aperitif, etc.)",6,546,"No, I did not consume these products in the last 7 days; Within the past 2 to 3 days; Yesterday, 1 to 2 times; Within the past 4 to 7 days; Yesterday, 3 or more times; -"
+Anal fissure,2,546,No; Yes
+Antibiotics,2,546,No; Yes
+Aphthous ulcers,2,546,No; Yes
+Arthralgias,2,546,No; Yes
+"Beans (tofu, soy, soy burgers, lentils, Mexican beans, lima beans etc)",6,546,"Within the past 2 to 3 days; Within the past 4 to 7 days; No, I did not consume these products in the last 7 days; Yesterday, 1 to 2 times; Yesterday, 3 or more times; -"
+Blood in the stool,4,462,-; nan; Occasionally frank (ocassionally a lot of blood); Trace (a little blood); Usually frank (usually a lot of blood)
+Bowel frequency during the day,4,546,-; 0 - 3; 6-Apr; 9-Jul
+Bowel frequency during the night,3,424,-; nan; 3-Jan; 6-Apr
+Chemotherapy,2,546,No; Yes
+"Dairy (milk, cream, ice cream, cheese, cream cheese)",6,546,"Yesterday, 1 to 2 times; -; Within the past 2 to 3 days; Within the past 4 to 7 days; Yesterday, 3 or more times; No, I did not consume these products in the last 7 days"
+Diagnosis,3,546,CD; UC; nonIBD
+"Diet soft drinks, tea or coffee with sugar (Stevia, Equal, Splenda etc)",6,546,"No, I did not consume these products in the last 7 days; Within the past 2 to 3 days; Yesterday, 1 to 2 times; Within the past 4 to 7 days; Yesterday, 3 or more times; -"
+Education Level,9,546,"Bachelor's degree; Professional/Doctoral degree; Master's degree; Some college, no degree; Unknown/Not Reported; High school graduate or GED; -; 7th grade or less; Some high school"
+Eggs,6,546,"Within the past 2 to 3 days; Within the past 4 to 7 days; Yesterday, 1 to 2 times; No, I did not consume these products in the last 7 days; Yesterday, 3 or more times; -"
+"Fish (fish nuggets, breaded fish, fish cakes, salmon, tuna, etc.)",6,546,"Within the past 2 to 3 days; Within the past 4 to 7 days; Yesterday, 1 to 2 times; No, I did not consume these products in the last 7 days; Yesterday, 3 or more times; -"
+"Fruit juice (orange, apple, cranberry, prune etc.)",6,546,"Within the past 4 to 7 days; Yesterday, 1 to 2 times; Within the past 2 to 3 days; No, I did not consume these products in the last 7 days; Yesterday, 3 or more times; -"
+"Fruits (no juice) (Apples, raisins, bananas, oranges, strawberries, blueberries",6,546,"Within the past 2 to 3 days; Yesterday, 1 to 2 times; Within the past 4 to 7 days; No, I did not consume these products in the last 7 days; Yesterday, 3 or more times; -"
+General wellbeing,6,546,Slightly below par; Very Well; Poor; -; Very Poor; Terrible
+HBI,14,546,4; 3; 7; 9; 5; -; 1; 2; 12; 8
+Hispanic or Latino Origin,2,546,Not Hispanic or Latino; Hispanic or Latino
+Immunosuppressants (e.g. oral corticosteroids),2,546,Yes; No
+Interval Name,24,546,Stool Collection #1; Stool Collection #5; Stool Collection #9; Stool Collection #15; Stool Collection #20; Stool Collection #24; Stool Collection #14; Stool Collection #17; Stool Collection #21; Stool Collection #10
+Interval days,45,546,-; 11; 15; 13; 14; 22; 9; 16; 21; 17
+New fistula,2,546,No; Yes
+Number of liquid or very soft stools in the past 24 hours:,11,546,1; 2; 5; 4; 3; -; 9; 999; 6; 15
+Occupation,5,546,Paid; Retired; Student; Unknown/Not Reported; Unpaid/volunteer
+Probiotic,6,546,"No, I did not consume these products in the last 7 days; -; Yesterday, 1 to 2 times; Yesterday, 3 or more times; Within the past 2 to 3 days; Within the past 4 to 7 days"
+"Processed meat (other red or white meat such as lunch meat, ham, salami, bologna",6,546,"No, I did not consume these products in the last 7 days; Within the past 2 to 3 days; Yesterday, 1 to 2 times; Within the past 4 to 7 days; -; Yesterday, 3 or more times"
+Race,5,546,White; Other; More than one race; Black or African American; American Indian or Alaska Native
+"Red meat (beef, hamburger, pork, lamb)",6,546,"No, I did not consume these products in the last 7 days; Within the past 4 to 7 days; Within the past 2 to 3 days; Yesterday, 1 to 2 times; Yesterday, 3 or more times; -"
+SCCAI,10,546,-; 2; 3; 1; 4; 5; 7; 6; 8; 12
+"Shellfish (shrimp, lobster, scallops, etc.)",6,546,"No, I did not consume these products in the last 7 days; Within the past 4 to 7 days; Within the past 2 to 3 days; Yesterday, 1 to 2 times; -; Yesterday, 3 or more times"
+Site Name,5,546,Cedars-Sinai; Emory; Cincinnati; MGH; MGH Pediatrics
+"Soft drinks, tea or coffee with sugar (corn syrup, maple syrup, cane sugar, etc)",6,546,"Yesterday, 1 to 2 times; No, I did not consume these products in the last 7 days; Within the past 4 to 7 days; Yesterday, 3 or more times; Within the past 2 to 3 days; -"
+Specify race,7,546,"-; 1/2 Cauc, 1/2 Hisp, Jewish and Non-Jewish mixed; Black/White; Hispanic/Latino & African American; White and African American; Brazilian; Portugese and Cape Verdean"
+"Starch (white rice, bread, pizza, potatoes, yams, cereals, pancakes, etc.)",6,546,"Yesterday, 1 to 2 times; Yesterday, 3 or more times; Within the past 4 to 7 days; Within the past 2 to 3 days; No, I did not consume these products in the last 7 days; -"
+"Sweets (pies, jam, chocolate, cake, cookies, etc.)",6,546,"Within the past 2 to 3 days; Yesterday, 1 to 2 times; Within the past 4 to 7 days; No, I did not consume these products in the last 7 days; Yesterday, 3 or more times; -"
+Tea or coffee no sugar and no sugar replacement,6,546,"No, I did not consume these products in the last 7 days; Within the past 4 to 7 days; Yesterday, 1 to 2 times; Within the past 2 to 3 days; Yesterday, 3 or more times; -"
+Urgency of defecation,4,478,-; Hurry; nan; Immediately; Incontinence
+"Vegetables (salad, tomatoes, onions, greens, carrots, peppers, green beans, etc)",6,546,"Within the past 2 to 3 days; Yesterday, 1 to 2 times; -; Yesterday, 3 or more times; Within the past 4 to 7 days; No, I did not consume these products in the last 7 days"
+Was HBI completed?,3,546,Yes; -; No
+Was SCCAI completed?,3,546,-; Yes; No
+Was subject terminated by investigator?,2,546,No; Yes
+Water,5,546,"Yesterday, 1 to 2 times; Yesterday, 3 or more times; Within the past 2 to 3 days; Within the past 4 to 7 days; -"
+Week Number,54,546,-; 8; 16; 28; 38; 46; 26; 32; 41; 7
+"White meat (chicken, turkey, etc.)",6,546,"No, I did not consume these products in the last 7 days; Within the past 2 to 3 days; Yesterday, 1 to 2 times; Within the past 4 to 7 days; Yesterday, 3 or more times; -"
+"Whole grains (wheat, oats, brown rice, rye, quinoa, wheat bread, wheat pasta)",6,546,"Yesterday, 1 to 2 times; Within the past 2 to 3 days; No, I did not consume these products in the last 7 days; Within the past 4 to 7 days; -; Yesterday, 3 or more times"
+"Yogurt or other foods containing active bacterial cultures (kefir, sauerkraut)",6,546,"Within the past 2 to 3 days; Yesterday, 1 to 2 times; No, I did not consume these products in the last 7 days; Within the past 4 to 7 days; Yesterday, 3 or more times; -"
+baseline_montreal_location,7,546,L3; -; L1; L2; L3+L4; L2+L4; L1+L4

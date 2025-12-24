@@ -1,0 +1,47 @@
+{
+  "lambda_grid": [
+    0.005,
+    0.01,
+    0.02,
+    0.04,
+    0.06,
+    0.08,
+    0.1,
+    0.15,
+    0.2,
+    0.3,
+    0.45,
+    0.6
+  ],
+  "best": {
+    "lambda_B": 0.6,
+    "alpha_F": -0.2706158473439986,
+    "alpha_A": -0.13965078647008788,
+    "k_LB": 0.0,
+    "alpha_obs": 15.2570800164329,
+    "beta_obs": -0.005759280822350218,
+    "loss_huber": 3.4671450824234427
+  },
+  "lags": {
+    "F": 0,
+    "A": 0,
+    "L": 1
+  },
+  "within_subject_center": true,
+  "driver_centering_note": "Drivers were centered within subject (X - mean_subject) before global robust scaling.",
+  "driver_scaling_centered_values": {
+    "F": {
+      "median": -0.002379503416321843,
+      "iqr": 0.3012372542848195
+    },
+    "A": {
+      "median": -0.104224837138281,
+      "iqr": 0.30660886875482163
+    },
+    "L": {
+      "median": -0.03707783941547588,
+      "iqr": 0.25430516631335914
+    },
+    "model": "noL"
+  }
+}

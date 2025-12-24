@@ -1,0 +1,3 @@
+group,n,mean_R2,median_R2
+any_antibiotic_yes=False,2,-0.26869225967300436,-0.26869225967300436
+any_antibiotic_yes=True,2,-0.6102531795267008,-0.6102531795267008
